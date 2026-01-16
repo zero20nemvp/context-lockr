@@ -2,7 +2,7 @@
 name = "context-lockr"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Delaney Burke <delaney@zero2one.ee>"]
 license = "MIT"
 description = "LLM-native content protection - lock files so only LLMs can decode them"
 repository = "https://github.com/zero20nemvp/context-lockr"
