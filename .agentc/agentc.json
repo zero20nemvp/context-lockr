@@ -1,0 +1,171 @@
+{
+  "version": "1.4",
+  "northStars": [
+    {
+      "id": "ns1",
+      "name": "Pipeline Context Lock",
+      "direction": "Pipeline-based context locking in Rust",
+      "why": "Small composable tools that each do one thing well, Unix philosophy",
+      "not": ["Monolithic all-in-one approach", "Ruby port with same architecture"],
+      "status": "active",
+      "frontOfMind": true
+    }
+  ],
+  "goals": [
+    {
+      "id": "g1",
+      "northStarId": "ns1",
+      "wish": "Implement glossary module",
+      "outcome": [
+        "context-lockr glossary build works",
+        "Round-trip encode/decode preserves text",
+        "Tests pass"
+      ],
+      "obstacles": ["Need to understand Ruby tokenization rules"],
+      "ifThen": [
+        {"if": "Tokenization edge cases unclear", "then": "Check Ruby tokenizer_spec.rb"}
+      ],
+      "stage": "implementation",
+      "milestones": [
+        {
+          "id": "m1",
+          "name": "Glossary struct",
+          "description": "Create src/glossary.rs with Glossary struct",
+          "acceptance_criteria": ["Glossary struct exists", "HashMap vocabulary field"],
+          "status": "pending",
+          "progress": 0
+        },
+        {
+          "id": "m2",
+          "name": "Tokenization",
+          "description": "Implement tokenize() - words, whitespace, punctuation",
+          "acceptance_criteria": ["Words extracted", "Whitespace runs preserved", "Punctuation separate"],
+          "status": "pending",
+          "progress": 0
+        },
+        {
+          "id": "m3",
+          "name": "Encode/Decode",
+          "description": "Implement encode() and decode() methods",
+          "acceptance_criteria": ["encode returns token IDs", "decode returns original text"],
+          "status": "pending",
+          "progress": 0
+        },
+        {
+          "id": "m4",
+          "name": "YAML serialization",
+          "description": "Save/load vocabulary to YAML",
+          "acceptance_criteria": ["save() writes YAML", "load() reads YAML"],
+          "status": "pending",
+          "progress": 0
+        },
+        {
+          "id": "m5",
+          "name": "CLI integration",
+          "description": "Wire glossary as subcommand",
+          "acceptance_criteria": ["glossary build works", "glossary encode works", "glossary decode works"],
+          "status": "pending",
+          "progress": 0
+        },
+        {
+          "id": "m6",
+          "name": "Tests",
+          "description": "Add tests and verify round-trip",
+          "acceptance_criteria": ["Unit tests pass", "Round-trip preserves text"],
+          "status": "pending",
+          "progress": 0
+        }
+      ],
+      "status": "active",
+      "created": "2026-01-16T00:00:00Z"
+    },
+    {
+      "id": "g2",
+      "northStarId": "ns1",
+      "wish": "Implement permutation module",
+      "outcome": [
+        "Vocabulary can be shuffled deterministically",
+        "Shuffle is reversible with same seed"
+      ],
+      "obstacles": [],
+      "ifThen": [],
+      "stage": "discovery",
+      "milestones": [],
+      "status": "pending",
+      "created": "2026-01-16T00:00:00Z"
+    },
+    {
+      "id": "g3",
+      "northStarId": "ns1",
+      "wish": "Implement shredding module",
+      "outcome": [
+        "Content splits across N files",
+        "Chaff lines added",
+        "Reassembly works"
+      ],
+      "obstacles": [],
+      "ifThen": [],
+      "stage": "discovery",
+      "milestones": [],
+      "status": "pending",
+      "created": "2026-01-16T00:00:00Z"
+    }
+  ],
+  "current": {
+    "loopState": "idle",
+    "lastAction": {
+      "action": "done",
+      "timestamp": "2026-01-16T20:15:00Z",
+      "description": "Completed: Align Rust locked header with Ruby neutral framing"
+    },
+    "humanTask": null,
+    "humanTaskQueue": [],
+    "aiTasks": [],
+    "batchMode": false,
+    "reviewDebt": [],
+    "reviewPending": false,
+    "prepWork": null,
+    "lastCheckIn": "2026-01-16T20:15:00Z"
+  },
+  "patterns": {
+    "manualTasks": [],
+    "lastPatternAnalysis": null
+  },
+  "velocity": {
+    "totalPoints": 3,
+    "totalBlocks": 3,
+    "history": [
+      {
+        "taskId": "adhoc-1",
+        "type": "completion",
+        "executor": "claude",
+        "task": "Align Rust locked header with Ruby neutral framing",
+        "northStarId": "ns1",
+        "goalId": null,
+        "points": 3,
+        "estimatedBlocks": 3,
+        "actualBlocks": 3,
+        "milkQuality": "semi-skimmed",
+        "capabilityGap": null,
+        "completedAt": "2026-01-16T20:15:00Z",
+        "verified": true
+      }
+    ]
+  },
+  "journal": [],
+  "suggestedCapabilities": [],
+  "metrics": {
+    "automation": {
+      "claudeTasks": 1,
+      "humanTasks": 0
+    },
+    "capabilityGaps": {
+      "external_access": 0,
+      "auth": 0,
+      "physical": 0,
+      "judgment": 0,
+      "domain_expertise": 0,
+      "communication": 0
+    }
+  }
+}
