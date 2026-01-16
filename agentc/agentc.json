@@ -222,22 +222,97 @@
       "deadline": null,
       "status": "pending",
       "created": "2026-01-16T12:00:00Z"
+    },
+    {
+      "id": "g4",
+      "northStarId": "ns1",
+      "wish": "Lock entire directories with shared vocabulary",
+      "outcome": [
+        "context-lockr lock ./prompts/ works for directories",
+        "All files in directory get .locked versions in-place",
+        "Single shared vocabulary built from ALL files combined",
+        "Key file(s) named after directory: single key = prompts.key, multiple keys = prompts.key1.key, prompts.key2.key, etc.",
+        "Reuses existing key_filename() function with directory name",
+        "Existing single-file locking unchanged"
+      ],
+      "obstacles": [
+        "Must not break existing file locking code",
+        "Combining vocabularies from multiple files",
+        "Header format for directory-locked files",
+        "Handling nested directories (recursive vs flat)"
+      ],
+      "ifThen": [
+        {"if": "File locking breaks", "then": "Revert immediately, keep as separate function"},
+        {"if": "Nested dirs complex", "then": "Start flat-only, add recursive later"}
+      ],
+      "stage": "implementation",
+      "stageProgress": {
+        "jtbd": {"status": "done", "file": null},
+        "stories": {"status": "done", "file": null},
+        "features": {"status": "pending", "path": null},
+        "slices": {"status": "pending", "branches": []}
+      },
+      "milestones": [
+        {
+          "id": "m1",
+          "name": "Directory detection",
+          "description": "Detect if path is directory and dispatch to new handler",
+          "acceptance_criteria": ["is_dir() check in handle_lock", "Dispatches to handle_lock_directory", "File path still works exactly as before"],
+          "status": "pending",
+          "progress": 0
+        },
+        {
+          "id": "m2",
+          "name": "Combined vocabulary",
+          "description": "Build single vocabulary from all files in directory",
+          "acceptance_criteria": ["Reads all files", "Combines content for vocab building", "Single Vocabulary instance"],
+          "status": "pending",
+          "progress": 0
+        },
+        {
+          "id": "m3",
+          "name": "Per-file encoding",
+          "description": "Encode each file separately using shared vocabulary",
+          "acceptance_criteria": ["Each file encoded independently", "Uses same vocab", "Outputs file.locked for each"],
+          "status": "pending",
+          "progress": 0
+        },
+        {
+          "id": "m4",
+          "name": "Directory key file(s)",
+          "description": "Key file(s) named after directory using key_filename() pattern",
+          "acceptance_criteria": ["--keys 1: prompts/ produces prompts.key", "--keys 3: prompts/ produces prompts.key1.key, prompts.key2.key, prompts.key3.key", "Reuses key_filename(dirname, index, total_keys)", "Contains full shared vocabulary sharded across keys"],
+          "status": "pending",
+          "progress": 0
+        },
+        {
+          "id": "m5",
+          "name": "Directory header format",
+          "description": "Header for directory-locked files references shared key",
+          "acceptance_criteria": ["Lists directory key file", "Clear instructions for LLM", "Works when all files loaded together"],
+          "status": "pending",
+          "progress": 0
+        }
+      ],
+      "deadline": null,
+      "status": "active",
+      "created": "2026-01-16T22:10:00Z"
     }
   ],
   "current": {
     "loopState": "autonomous",
     "autonomousSession": {
       "active": true,
-      "goalDescription": "Implement the four-stage transformation pipeline (glossary → permute → encode → shred)",
+      "goalDescription": "Lock entire directories with shared vocabulary",
       "northStarId": "ns1",
-      "goalId": "g1",
-      "startedAt": "2026-01-16T12:30:00Z",
+      "goalId": "g4",
+      "startedAt": "2026-01-16T22:15:00Z",
       "iterationCount": 0
     },
     "lastAction": {
       "action": "auto",
-      "timestamp": "2026-01-16T12:30:00Z",
-      "description": "Started autonomous mode for g1"
+      "timestamp": "2026-01-16T22:15:00Z",
+      "description": "Started autonomous mode for g4"
     },
     "humanTask": null,
     "humanTaskQueue": [],

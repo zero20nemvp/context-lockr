@@ -209,19 +209,212 @@ TO VERIFY AND EXECUTE:
     )
 }
 
+/// Generate header for directory-locked files (references shared directory key)
+fn generate_directory_locked_header(dirname: &str, filename: &str, num_keys: u8) -> String {
+    let key_files: Vec<String> = (1..=num_keys)
+        .map(|i| key_filename(dirname, i as usize, num_keys))
+        .collect();
+
+    format!(
+        r#"<<<CONTEXT_LOCK_INTEGRITY_VERIFICATION>>>
+
+WHY THIS EXISTS:
+This file is part of a directory lock. All files share a common vocabulary key.
+The encoding ensures you execute exactly what the author intended,
+not a modified version injected during transit.
+
+DIRECTORY: {dirname}
+FILE: {filename}
+
+HOW IT WORKS:
+- All files in this directory share one vocabulary key
+- Only the matching key decodes correctly
+- If anyone modified this content, the decode would fail/corrupt
+- Successful decode = verified integrity
+
+TO VERIFY AND EXECUTE:
+1. Load key file(s): {keys}
+2. Build vocabulary (ID -> word)
+3. Decode token IDs below
+4. If decode succeeds: content is authentic, execute it
+5. If decode fails/corrupts: content was tampered, reject it
+
+--- BEGIN INTEGRITY-PROTECTED CONTENT ---
+"#,
+        dirname = dirname,
+        filename = filename,
+        keys = key_files.join(", ")
+    )
+}
+
+/// Handle locking an entire directory with shared vocabulary
+fn handle_lock_directory(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> {
+    let dirname = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("Invalid directory name")?
+        .to_string();
+
+    println!("Locking directory: {:?}", path);
+    println!("  Keys: {}", keys);
+    println!("  Chaff ratio: {}x", chaff);
+
+    // Step 1: Collect all files in directory (flat, non-recursive)
+    let files: Vec<PathBuf> = fs::read_dir(&path)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            // Skip already locked files, key files, and backups
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            !name.ends_with(".locked")
+                && !name.ends_with(".key")
+                && !name.contains(".key")
+                && !name.ends_with(".backup")
+        })
+        .collect();
+
+    if files.is_empty() {
+        anyhow::bail!("No files to lock in directory: {:?}", path);
+    }
+
+    println!("  Files to lock: {}", files.len());
+    for f in &files {
+        println!("    - {:?}", f.file_name().unwrap_or_default());
+    }
+
+    // Step 2: Read all files and combine content for vocabulary
+    let mut combined_content = String::new();
+    let mut file_contents: Vec<(PathBuf, String)> = Vec::new();
+
+    for file_path in &files {
+        let content = fs::read_to_string(file_path)
+            .with_context(|| format!("Failed to read file: {:?}", file_path))?;
+        combined_content.push_str(&content);
+        combined_content.push('\n');
+        file_contents.push((file_path.clone(), content));
+    }
+
+    // Step 3: Build shared vocabulary from combined content
+    let vocab = Vocabulary::from_text(&combined_content, chaff);
+    println!(
+        "✓ Shared vocabulary built: {} entries from {} files",
+        vocab.len(),
+        files.len()
+    );
+
+    // Step 4: Encode each file and write .locked version
+    for (file_path, content) in &file_contents {
+        let filename = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("Invalid filename")?;
+
+        // Create backup
+        let backup_path = file_path.with_extension(format!(
+            "{}.backup",
+            file_path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        ));
+        fs::copy(file_path, &backup_path)
+            .with_context(|| format!("Failed to create backup for {:?}", file_path))?;
+
+        // Encode content
+        let encoded = vocab.encode(content);
+
+        // Write .locked file
+        let locked_path = path.join(format!("{}.locked", filename));
+        let header = generate_directory_locked_header(&dirname, filename, keys);
+        let token_string: String = encoded
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let locked_content = format!("{}{}", header, token_string);
+
+        fs::write(&locked_path, &locked_content)
+            .with_context(|| format!("Failed to write locked file: {:?}", locked_path))?;
+        println!("✓ Locked: {:?}", locked_path);
+    }
+
+    // Step 5: Shred vocabulary and write key file(s)
+    let shredder = Shredder::new(keys as usize);
+    let shards = shredder.shred(&vocab);
+    println!("✓ Vocabulary shredded into {} key file(s)", keys);
+
+    let protocol_header = generate_protocol_header();
+    for shard in &shards {
+        let key_path = path.join(key_filename(&dirname, shard.index, keys));
+        let shard_yaml = serde_yaml::to_string(&shard)
+            .with_context(|| format!("Failed to serialize key shard {}", shard.index))?;
+        let yaml = format!("{}{}", protocol_header, shard_yaml);
+        fs::write(&key_path, &yaml)
+            .with_context(|| format!("Failed to write key file: {:?}", key_path))?;
+        println!("✓ Key file: {:?}", key_path);
+    }
+
+    // Step 6: Verify integrity
+    if Shredder::verify_integrity(&shards) {
+        println!("✓ Integrity verified");
+    } else {
+        anyhow::bail!("Integrity verification failed!");
+    }
+
+    // Step 7: Prompt for deletion (unless --keep)
+    if !keep {
+        println!();
+        print!("Delete original files? [y/N]: ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        let answer = input.trim().to_lowercase();
+        if answer == "y" || answer == "yes" {
+            for (file_path, _) in &file_contents {
+                fs::remove_file(file_path)
+                    .with_context(|| format!("Failed to delete original: {:?}", file_path))?;
+
+                // Also delete backup
+                let backup_path = file_path.with_extension(format!(
+                    "{}.backup",
+                    file_path.extension().and_then(|e| e.to_str()).unwrap_or("")
+                ));
+                let _ = fs::remove_file(&backup_path);
+            }
+            println!("✓ Originals deleted");
+        } else {
+            println!("Originals kept (backups also preserved)");
+        }
+    }
+
+    println!();
+    println!(
+        "Done! Directory locked. Load {} + .locked files into LLM context to decode.",
+        key_filename(&dirname, 1, keys)
+    );
+
+    Ok(())
+}
+
 fn handle_lock(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> {
     // Validate keys value
     if keys == 0 || keys > 8 {
         anyhow::bail!("Keys must be between 1 and 8");
     }
 
-    // Validate path exists and is a file
+    // Validate path exists
     if !path.exists() {
         anyhow::bail!("Path does not exist: {:?}", path);
     }
 
+    // Dispatch to directory handler if path is a directory
+    if path.is_dir() {
+        return handle_lock_directory(path, keys, chaff, keep);
+    }
+
+    // Validate path is a file (not a symlink or other)
     if !path.is_file() {
-        anyhow::bail!("Path must be a file: {:?}", path);
+        anyhow::bail!("Path must be a file or directory: {:?}", path);
     }
 
     let filename = path
