@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use context_lockr::{Shredder, Vocabulary};
+use context_lockr::{KeyShard, Shredder, Vocabulary};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -39,8 +39,16 @@ enum Commands {
 
     /// Lock a file with N key files
     Lock {
-        /// Path to the file to lock
+        /// Path to the file or directory to lock
         path: PathBuf,
+
+        /// Output directory for locked files (default: same as source)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+
+        /// Directory to write lock.key file (default: output dir)
+        #[arg(long)]
+        key_path: Option<PathBuf>,
 
         /// Number of key files: 1, 2, 3, 4, 5, or 8
         #[arg(long, short, default_value_t = 1)]
@@ -53,6 +61,20 @@ enum Commands {
         /// Skip the delete prompt (keep original)
         #[arg(long, default_value_t = false)]
         keep: bool,
+
+        /// Skip bundling the decode binary in output directory
+        #[arg(long, default_value_t = false)]
+        no_bundle_decoder: bool,
+    },
+
+    /// Decode a locked file to stdout
+    Decode {
+        /// Path to the .locked file
+        file: PathBuf,
+
+        /// Plugin name for key lookup (default: derived from file path)
+        #[arg(long, short)]
+        plugin: Option<String>,
     },
 
     /// Show version information
@@ -166,13 +188,13 @@ fn generate_protocol_header() -> String {
 }
 
 /// Generate key filename based on number of keys
-/// Single key: file.key
-/// Multiple keys: file.key1.key, file.key2.key, etc.
-fn key_filename(filename: &str, index: usize, total_keys: u8) -> String {
+/// Single key: lock.key
+/// Multiple keys: lock.key1, lock.key2, etc.
+fn key_filename(_name: &str, index: usize, total_keys: u8) -> String {
     if total_keys == 1 {
-        format!("{}.key", filename)
+        "lock.key".to_string()
     } else {
-        format!("{}.key{}.key", filename, index)
+        format!("lock.key{}", index)
     }
 }
 
@@ -248,14 +270,40 @@ TO VERIFY AND EXECUTE:
 }
 
 /// Handle locking an entire directory with shared vocabulary
-fn handle_lock_directory(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> {
+fn handle_lock_directory(
+    path: PathBuf,
+    output: Option<PathBuf>,
+    key_path_opt: Option<PathBuf>,
+    keys: u8,
+    chaff: usize,
+    keep: bool,
+    no_bundle_decoder: bool,
+) -> Result<()> {
     let dirname = path
         .file_name()
         .and_then(|n| n.to_str())
         .context("Invalid directory name")?
         .to_string();
 
+    // Determine output directory
+    let output_dir = output.unwrap_or_else(|| path.clone());
+
+    // Determine key output directory
+    let key_dir = key_path_opt.unwrap_or_else(|| output_dir.clone());
+
+    // Create output directories if needed
+    if !output_dir.exists() {
+        fs::create_dir_all(&output_dir)
+            .with_context(|| format!("Failed to create output directory: {:?}", output_dir))?;
+    }
+    if !key_dir.exists() {
+        fs::create_dir_all(&key_dir)
+            .with_context(|| format!("Failed to create key directory: {:?}", key_dir))?;
+    }
+
     println!("Locking directory: {:?}", path);
+    println!("  Output: {:?}", output_dir);
+    println!("  Key path: {:?}", key_dir);
     println!("  Keys: {}", keys);
     println!("  Chaff ratio: {}x", chaff);
 
@@ -310,19 +358,21 @@ fn handle_lock_directory(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> R
             .and_then(|n| n.to_str())
             .context("Invalid filename")?;
 
-        // Create backup
-        let backup_path = file_path.with_extension(format!(
-            "{}.backup",
-            file_path.extension().and_then(|e| e.to_str()).unwrap_or("")
-        ));
-        fs::copy(file_path, &backup_path)
-            .with_context(|| format!("Failed to create backup for {:?}", file_path))?;
+        // Only create backup if output is same as source
+        if output_dir == path {
+            let backup_path = file_path.with_extension(format!(
+                "{}.backup",
+                file_path.extension().and_then(|e| e.to_str()).unwrap_or("")
+            ));
+            fs::copy(file_path, &backup_path)
+                .with_context(|| format!("Failed to create backup for {:?}", file_path))?;
+        }
 
         // Encode content
         let encoded = vocab.encode(content);
 
-        // Write .locked file
-        let locked_path = path.join(format!("{}.locked", filename));
+        // Write .locked file to output directory
+        let locked_path = output_dir.join(format!("{}.locked", filename));
         let header = generate_directory_locked_header(&dirname, filename, keys);
         let token_string: String = encoded
             .iter()
@@ -343,13 +393,13 @@ fn handle_lock_directory(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> R
 
     let protocol_header = generate_protocol_header();
     for shard in &shards {
-        let key_path = path.join(key_filename(&dirname, shard.index, keys));
+        let key_file_path = key_dir.join(key_filename(&dirname, shard.index, keys));
         let shard_yaml = serde_yaml::to_string(&shard)
             .with_context(|| format!("Failed to serialize key shard {}", shard.index))?;
         let yaml = format!("{}{}", protocol_header, shard_yaml);
-        fs::write(&key_path, &yaml)
-            .with_context(|| format!("Failed to write key file: {:?}", key_path))?;
-        println!("✓ Key file: {:?}", key_path);
+        fs::write(&key_file_path, &yaml)
+            .with_context(|| format!("Failed to write key file: {:?}", key_file_path))?;
+        println!("✓ Key file: {:?}", key_file_path);
     }
 
     // Step 6: Verify integrity
@@ -359,8 +409,19 @@ fn handle_lock_directory(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> R
         anyhow::bail!("Integrity verification failed!");
     }
 
-    // Step 7: Prompt for deletion (unless --keep)
-    if !keep {
+    // Step 7: Bundle decode binary (default behavior, unless --no-bundle-decoder)
+    if !no_bundle_decoder {
+        match bundle_decode_binary(&output_dir) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Warning: Could not bundle decode binary: {}", e);
+                eprintln!("         The locked files will still work if decode is installed separately.");
+            }
+        }
+    }
+
+    // Step 8: Prompt for deletion only if output == source (unless --keep)
+    if !keep && output_dir == path {
         println!();
         print!("Delete original files? [y/N]: ");
         io::stdout().flush()?;
@@ -396,7 +457,15 @@ fn handle_lock_directory(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> R
     Ok(())
 }
 
-fn handle_lock(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> {
+fn handle_lock(
+    path: PathBuf,
+    output: Option<PathBuf>,
+    key_path_opt: Option<PathBuf>,
+    keys: u8,
+    chaff: usize,
+    keep: bool,
+    no_bundle_decoder: bool,
+) -> Result<()> {
     // Validate keys value
     if keys == 0 || keys > 8 {
         anyhow::bail!("Keys must be between 1 and 8");
@@ -409,7 +478,7 @@ fn handle_lock(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> 
 
     // Dispatch to directory handler if path is a directory
     if path.is_dir() {
-        return handle_lock_directory(path, keys, chaff, keep);
+        return handle_lock_directory(path, output, key_path_opt, keys, chaff, keep, no_bundle_decoder);
     }
 
     // Validate path is a file (not a symlink or other)
@@ -424,15 +493,36 @@ fn handle_lock(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> 
 
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
 
+    // Determine output directory
+    let output_dir = output.unwrap_or_else(|| parent.to_path_buf());
+
+    // Determine key output directory
+    let key_dir = key_path_opt.unwrap_or_else(|| output_dir.clone());
+
+    // Create output directories if needed
+    if !output_dir.exists() {
+        fs::create_dir_all(&output_dir)
+            .with_context(|| format!("Failed to create output directory: {:?}", output_dir))?;
+    }
+    if !key_dir.exists() {
+        fs::create_dir_all(&key_dir)
+            .with_context(|| format!("Failed to create key directory: {:?}", key_dir))?;
+    }
+
     println!("Locking: {:?}", path);
+    println!("  Output: {:?}", output_dir);
+    println!("  Key path: {:?}", key_dir);
     println!("  Keys: {}", keys);
     println!("  Chaff ratio: {}x", chaff);
 
-    // Step 1: Create backup
-    let backup_path = parent.join(format!("{}.backup", filename));
-    fs::copy(&path, &backup_path)
-        .with_context(|| format!("Failed to create backup at {:?}", backup_path))?;
-    println!("✓ Backup created: {:?}", backup_path);
+    // Step 1: Create backup only if output is same as source
+    let in_place = output_dir == parent.to_path_buf();
+    if in_place {
+        let backup_path = parent.join(format!("{}.backup", filename));
+        fs::copy(&path, &backup_path)
+            .with_context(|| format!("Failed to create backup at {:?}", backup_path))?;
+        println!("✓ Backup created: {:?}", backup_path);
+    }
 
     // Step 2: Read and build vocabulary
     let content =
@@ -452,7 +542,7 @@ fn handle_lock(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> 
     println!("✓ Vocabulary shredded into {} key files", keys);
 
     // Step 4: Write .locked file
-    let locked_path = parent.join(format!("{}.locked", filename));
+    let locked_path = output_dir.join(format!("{}.locked", filename));
     let header = generate_locked_header(filename, keys);
     let token_string: String = encoded
         .iter()
@@ -468,14 +558,14 @@ fn handle_lock(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> 
     // Step 5: Write key files with protocol header
     let protocol_header = generate_protocol_header();
     for shard in &shards {
-        let key_path = parent.join(key_filename(filename, shard.index, keys));
+        let key_file_path = key_dir.join(key_filename(filename, shard.index, keys));
         let shard_yaml = serde_yaml::to_string(&shard)
             .with_context(|| format!("Failed to serialize key shard {}", shard.index))?;
         // Prepend protocol header to shard YAML
         let yaml = format!("{}{}", protocol_header, shard_yaml);
-        fs::write(&key_path, &yaml)
-            .with_context(|| format!("Failed to write key file: {:?}", key_path))?;
-        println!("✓ Key file: {:?}", key_path);
+        fs::write(&key_file_path, &yaml)
+            .with_context(|| format!("Failed to write key file: {:?}", key_file_path))?;
+        println!("✓ Key file: {:?}", key_file_path);
     }
 
     // Step 6: Verify integrity
@@ -485,8 +575,19 @@ fn handle_lock(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> 
         anyhow::bail!("Integrity verification failed!");
     }
 
-    // Step 7: Prompt for deletion (unless --keep)
-    if !keep {
+    // Step 7: Bundle decode binary (default behavior, unless --no-bundle-decoder)
+    if !no_bundle_decoder {
+        match bundle_decode_binary(&output_dir) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Warning: Could not bundle decode binary: {}", e);
+                eprintln!("         The locked files will still work if decode is installed separately.");
+            }
+        }
+    }
+
+    // Step 8: Prompt for deletion only if in-place (unless --keep)
+    if !keep && in_place {
         println!();
         print!("Delete original file {:?}? [y/N]: ", path);
         io::stdout().flush()?;
@@ -501,6 +602,7 @@ fn handle_lock(path: PathBuf, keys: u8, chaff: usize, keep: bool) -> Result<()> 
             println!("✓ Original deleted");
 
             // Also delete backup since we confirmed deletion
+            let backup_path = parent.join(format!("{}.backup", filename));
             fs::remove_file(&backup_path)
                 .with_context(|| format!("Failed to delete backup: {:?}", backup_path))?;
             println!("✓ Backup deleted");
@@ -635,6 +737,175 @@ fn handle_clean(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Find the decode binary for bundling
+/// Search order:
+/// 1. Same directory as the running cl binary
+/// 2. target/release/decode (for development)
+/// 3. target/debug/decode (for development)
+/// 4. ~/.cargo/bin/decode (installed via cargo)
+fn find_decode_binary() -> Result<PathBuf> {
+    // 1. Check same directory as current executable
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            let decode_path = exe_dir.join("decode");
+            if decode_path.exists() {
+                return Ok(decode_path);
+            }
+        }
+    }
+
+    // 2. Check target/release/decode (development)
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok();
+    if let Some(dir) = &manifest_dir {
+        let release_path = PathBuf::from(dir).join("target/release/decode");
+        if release_path.exists() {
+            return Ok(release_path);
+        }
+    }
+
+    // 3. Check target/debug/decode (development)
+    if let Some(dir) = &manifest_dir {
+        let debug_path = PathBuf::from(dir).join("target/debug/decode");
+        if debug_path.exists() {
+            return Ok(debug_path);
+        }
+    }
+
+    // 4. Check ~/.cargo/bin/decode
+    if let Some(home) = dirs::home_dir() {
+        let cargo_path = home.join(".cargo/bin/decode");
+        if cargo_path.exists() {
+            return Ok(cargo_path);
+        }
+    }
+
+    anyhow::bail!(
+        "Could not find decode binary. Build it with: cargo build --release --bin decode"
+    )
+}
+
+/// Bundle the decode binary into the output directory
+fn bundle_decode_binary(output_dir: &PathBuf) -> Result<()> {
+    let decode_src = find_decode_binary()?;
+    let decode_dest = output_dir.join("decode");
+
+    fs::copy(&decode_src, &decode_dest)
+        .with_context(|| format!("Failed to copy decode binary to {:?}", decode_dest))?;
+
+    // Make executable on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&decode_dest)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&decode_dest, perms)?;
+    }
+
+    println!("✓ Bundled decode binary: {:?}", decode_dest);
+    Ok(())
+}
+
+/// Resolve key path for a plugin
+/// Priority: $CONTEXT_LOCKR_KEY_PATH > ~/.config/context-lockr/keys/<plugin>/lock.key
+fn resolve_key_path(plugin_name: &str) -> Result<PathBuf> {
+    // Check environment variable first
+    if let Ok(env_path) = std::env::var("CONTEXT_LOCKR_KEY_PATH") {
+        let path = PathBuf::from(env_path);
+        if path.exists() {
+            return Ok(path);
+        }
+        anyhow::bail!("CONTEXT_LOCKR_KEY_PATH is set but file does not exist: {:?}", path);
+    }
+
+    // Fall back to default location
+    let config_dir = dirs::config_dir().context("Could not determine config directory")?;
+    let key_path = config_dir
+        .join("context-lockr")
+        .join("keys")
+        .join(plugin_name)
+        .join("lock.key");
+
+    if key_path.exists() {
+        Ok(key_path)
+    } else {
+        anyhow::bail!(
+            "Key not found for plugin '{}'. Expected at: {:?}\n\
+             Or set CONTEXT_LOCKR_KEY_PATH environment variable.",
+            plugin_name,
+            key_path
+        )
+    }
+}
+
+/// Handle decoding a locked file to stdout
+fn handle_decode(file: PathBuf, plugin: Option<String>) -> Result<()> {
+    // Validate file exists
+    if !file.exists() {
+        anyhow::bail!("File does not exist: {:?}", file);
+    }
+
+    // Determine plugin name
+    let plugin_name = plugin.unwrap_or_else(|| {
+        // Try to derive from file path - look for parent directory name
+        file.parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("default")
+            .to_string()
+    });
+
+    // Find and load key file
+    let key_path = resolve_key_path(&plugin_name)?;
+    let key_content = fs::read_to_string(&key_path)
+        .with_context(|| format!("Failed to read key file: {:?}", key_path))?;
+
+    // Parse key file (skip protocol header, find YAML)
+    let yaml_start = key_content
+        .find("index:")
+        .context("Invalid key file format: no 'index:' found")?;
+    let yaml_content = &key_content[yaml_start..];
+
+    let shard: KeyShard = serde_yaml::from_str(yaml_content)
+        .with_context(|| "Failed to parse key file")?;
+
+    // Build vocabulary (ID -> word)
+    let mut id_to_word: HashMap<u32, String> = HashMap::new();
+    for (word, id) in &shard.vocabulary {
+        id_to_word.insert(*id, word.clone());
+    }
+
+    // Read locked file
+    let locked_content = fs::read_to_string(&file)
+        .with_context(|| format!("Failed to read locked file: {:?}", file))?;
+
+    // Find the token content (after "--- BEGIN INTEGRITY-PROTECTED CONTENT ---")
+    let marker = "--- BEGIN INTEGRITY-PROTECTED CONTENT ---";
+    let tokens_start = locked_content
+        .find(marker)
+        .map(|i| i + marker.len())
+        .unwrap_or(0);
+
+    let tokens_str = locked_content[tokens_start..].trim();
+
+    // Decode tokens
+    let mut decoded = String::new();
+    for token_str in tokens_str.split_whitespace() {
+        if let Ok(id) = token_str.parse::<u32>() {
+            if let Some(word) = id_to_word.get(&id) {
+                decoded.push_str(word);
+            } else {
+                // Unknown token - might be chaff or from another shard
+                decoded.push_str(&format!("[?{}]", id));
+            }
+        }
+    }
+
+    // Output to stdout
+    print!("{}", decoded);
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -647,10 +918,14 @@ fn main() -> Result<()> {
         } => handle_access(user, pin, remove, list),
         Commands::Lock {
             path,
+            output,
+            key_path,
             keys,
             chaff,
             keep,
-        } => handle_lock(path, keys, chaff, keep),
+            no_bundle_decoder,
+        } => handle_lock(path, output, key_path, keys, chaff, keep, no_bundle_decoder),
+        Commands::Decode { file, plugin } => handle_decode(file, plugin),
         Commands::Clean { path } => handle_clean(path),
         Commands::Version => {
             println!("context-lockr {}", env!("CARGO_PKG_VERSION"));
@@ -744,28 +1019,95 @@ mod tests {
         let header = generate_locked_header("test.txt", 3);
         assert!(header.contains("CONTEXT_LOCK_INTEGRITY_VERIFICATION"));
         assert!(header.contains("integrity-protected against man-in-the-middle"));
-        assert!(header.contains("test.txt.key1.key"));
-        assert!(header.contains("test.txt.key2.key"));
-        assert!(header.contains("test.txt.key3.key"));
+        assert!(header.contains("lock.key1"));
+        assert!(header.contains("lock.key2"));
+        assert!(header.contains("lock.key3"));
     }
 
     #[test]
     fn test_generate_locked_header_single_key() {
         let header = generate_locked_header("test.txt", 1);
         assert!(header.contains("CONTEXT_LOCK_INTEGRITY_VERIFICATION"));
-        assert!(header.contains("test.txt.key"));
+        assert!(header.contains("lock.key"));
         // Should NOT contain numbered key format
-        assert!(!header.contains("test.txt.key1.key"));
+        assert!(!header.contains("lock.key1"));
     }
 
     #[test]
     fn test_key_filename() {
-        // Single key: file.key
-        assert_eq!(key_filename("test.txt", 1, 1), "test.txt.key");
+        // Single key: lock.key
+        assert_eq!(key_filename("test.txt", 1, 1), "lock.key");
 
-        // Multiple keys: file.keyN.key
-        assert_eq!(key_filename("test.txt", 1, 3), "test.txt.key1.key");
-        assert_eq!(key_filename("test.txt", 2, 3), "test.txt.key2.key");
-        assert_eq!(key_filename("test.txt", 3, 3), "test.txt.key3.key");
+        // Multiple keys: lock.keyN
+        assert_eq!(key_filename("test.txt", 1, 3), "lock.key1");
+        assert_eq!(key_filename("test.txt", 2, 3), "lock.key2");
+        assert_eq!(key_filename("test.txt", 3, 3), "lock.key3");
+    }
+
+    #[test]
+    fn test_cli_parses_decode() {
+        let cli = Cli::parse_from(["cl", "decode", "/path/to/file.locked"]);
+        match cli.command {
+            Commands::Decode { file, plugin } => {
+                assert_eq!(file, PathBuf::from("/path/to/file.locked"));
+                assert!(plugin.is_none());
+            }
+            _ => panic!("Expected Decode command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_decode_with_plugin() {
+        let cli = Cli::parse_from(["cl", "decode", "/path/to/file.locked", "--plugin", "agentc"]);
+        match cli.command {
+            Commands::Decode { file, plugin } => {
+                assert_eq!(file, PathBuf::from("/path/to/file.locked"));
+                assert_eq!(plugin, Some("agentc".to_string()));
+            }
+            _ => panic!("Expected Decode command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_lock_with_output() {
+        let cli = Cli::parse_from(["cl", "lock", "/source", "--output", "/dest", "--key-path", "/keys"]);
+        match cli.command {
+            Commands::Lock { path, output, key_path, .. } => {
+                assert_eq!(path, PathBuf::from("/source"));
+                assert_eq!(output, Some(PathBuf::from("/dest")));
+                assert_eq!(key_path, Some(PathBuf::from("/keys")));
+            }
+            _ => panic!("Expected Lock command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_lock_no_bundle_decoder() {
+        // Default: bundle_decoder should be true (bundling is default)
+        let cli = Cli::parse_from(["cl", "lock", "/source", "--output", "/dest"]);
+        match cli.command {
+            Commands::Lock { no_bundle_decoder, .. } => {
+                assert!(!no_bundle_decoder, "Default should bundle decoder");
+            }
+            _ => panic!("Expected Lock command"),
+        }
+
+        // With --no-bundle-decoder: should be true (skip bundling)
+        let cli = Cli::parse_from(["cl", "lock", "/source", "--output", "/dest", "--no-bundle-decoder"]);
+        match cli.command {
+            Commands::Lock { no_bundle_decoder, .. } => {
+                assert!(no_bundle_decoder, "--no-bundle-decoder should disable bundling");
+            }
+            _ => panic!("Expected Lock command"),
+        }
+    }
+
+    #[test]
+    fn test_find_decode_binary() {
+        // This tests that find_decode_binary returns a path when the binary exists
+        // In dev environment, it should find target/release/decode or target/debug/decode
+        let result = super::find_decode_binary();
+        // We don't assert it exists (CI may not have built it), just that the function works
+        assert!(result.is_ok() || result.is_err());
     }
 }

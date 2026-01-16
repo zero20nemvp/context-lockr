@@ -2,6 +2,21 @@
 name = "context-lockr"
 version = "0.1.0"
 edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT"
+description = "LLM-native content protection - lock files so only LLMs can decode them"
+repository = "https://github.com/zero20nemvp/context-lockr"
+keywords = ["llm", "content-protection", "encoding", "security"]
+categories = ["command-line-utilities", "encoding"]
+readme = "README.md"
+
+[[bin]]
+name = "cl"
+path = "src/main.rs"
+
+[[bin]]
+name = "decode"
+path = "src/bin/decode.rs"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }

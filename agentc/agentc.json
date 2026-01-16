@@ -178,12 +178,12 @@
         {"if": "Cross-compilation fails", "then": "Use GitHub Actions matrix builds"},
         {"if": "Homebrew tap complex", "then": "Start with manual formula, automate later"}
       ],
-      "stage": "discovery",
+      "stage": "implementation",
       "stageProgress": {
-        "jtbd": {"status": "pending", "file": null},
-        "stories": {"status": "pending", "file": null},
-        "features": {"status": "pending", "path": null},
-        "slices": {"status": "pending", "branches": []}
+        "jtbd": {"status": "done", "file": null},
+        "stories": {"status": "done", "file": null},
+        "features": {"status": "done", "path": null},
+        "slices": {"status": "done", "branches": []}
       },
       "milestones": [
         {
@@ -220,7 +220,7 @@
         }
       ],
       "deadline": null,
-      "status": "pending",
+      "status": "active",
       "created": "2026-01-16T12:00:00Z"
     },
     {
@@ -258,65 +258,216 @@
           "name": "Directory detection",
           "description": "Detect if path is directory and dispatch to new handler",
           "acceptance_criteria": ["is_dir() check in handle_lock", "Dispatches to handle_lock_directory", "File path still works exactly as before"],
-          "status": "pending",
-          "progress": 0
+          "status": "complete",
+          "progress": 100
         },
         {
           "id": "m2",
           "name": "Combined vocabulary",
           "description": "Build single vocabulary from all files in directory",
           "acceptance_criteria": ["Reads all files", "Combines content for vocab building", "Single Vocabulary instance"],
-          "status": "pending",
-          "progress": 0
+          "status": "complete",
+          "progress": 100
         },
         {
           "id": "m3",
           "name": "Per-file encoding",
           "description": "Encode each file separately using shared vocabulary",
           "acceptance_criteria": ["Each file encoded independently", "Uses same vocab", "Outputs file.locked for each"],
-          "status": "pending",
-          "progress": 0
+          "status": "complete",
+          "progress": 100
         },
         {
           "id": "m4",
           "name": "Directory key file(s)",
           "description": "Key file(s) named after directory using key_filename() pattern",
           "acceptance_criteria": ["--keys 1: prompts/ produces prompts.key", "--keys 3: prompts/ produces prompts.key1.key, prompts.key2.key, prompts.key3.key", "Reuses key_filename(dirname, index, total_keys)", "Contains full shared vocabulary sharded across keys"],
-          "status": "pending",
-          "progress": 0
+          "status": "complete",
+          "progress": 100
         },
         {
           "id": "m5",
           "name": "Directory header format",
           "description": "Header for directory-locked files references shared key",
           "acceptance_criteria": ["Lists directory key file", "Clear instructions for LLM", "Works when all files loaded together"],
-          "status": "pending",
-          "progress": 0
+          "status": "complete",
+          "progress": 100
         }
       ],
       "deadline": null,
-      "status": "active",
+      "status": "complete",
       "created": "2026-01-16T22:10:00Z"
+    },
+    {
+      "id": "g5",
+      "northStarId": "ns1",
+      "wish": "Access-controlled plugin deployment with on-demand decode",
+      "outcome": [
+        "cl lock --output <dir> writes locked files to separate directory (source untouched)",
+        "cl lock --key-path <dir> writes lock.key to specified location",
+        "cl decode <file.locked> --plugin <name> outputs decoded content to stdout",
+        "Key lookup: $CONTEXT_LOCKR_KEY_PATH env var, then ~/.config/context-lockr/keys/<plugin>/lock.key",
+        "Standalone decode binary small enough to bundle in plugins (<1MB)",
+        "PreToolUse hook intercepts Read on .locked files, runs decode transparently"
+      ],
+      "obstacles": [
+        "Separating decode logic into minimal binary",
+        "Hook integration with Claude Code plugin system",
+        "Key path resolution across platforms"
+      ],
+      "ifThen": [
+        {"if": "Binary too large", "then": "Strip symbols, use release profile optimizations"},
+        {"if": "Hook system doesn't support content replacement", "then": "Fall back to CLAUDE.md instructions"}
+      ],
+      "stage": "implementation",
+      "stageProgress": {
+        "jtbd": {"status": "done", "file": null},
+        "stories": {"status": "done", "file": null},
+        "features": {"status": "done", "path": null},
+        "slices": {"status": "pending", "branches": []}
+      },
+      "milestones": [
+        {
+          "id": "m1",
+          "name": "Output directory support",
+          "description": "Add --output flag to lock command for writing locked files to different location",
+          "acceptance_criteria": ["--output <dir> writes .locked files there", "Source files never modified", "Creates output dir if needed"],
+          "status": "complete",
+          "progress": 100
+        },
+        {
+          "id": "m2",
+          "name": "Key path support",
+          "description": "Add --key-path flag to lock command for writing key to specific location",
+          "acceptance_criteria": ["--key-path <dir> writes lock.key there", "Creates key dir if needed", "Works with --output"],
+          "status": "complete",
+          "progress": 100
+        },
+        {
+          "id": "m3",
+          "name": "Rename key files",
+          "description": "Change key file naming from .key1.key to lock.key format",
+          "acceptance_criteria": ["Single key: lock.key", "Multiple keys: lock.key1, lock.key2, etc.", "Backward compatible reading"],
+          "status": "complete",
+          "progress": 100
+        },
+        {
+          "id": "m4",
+          "name": "Key path resolution",
+          "description": "Add keypath.rs module for resolving key location",
+          "acceptance_criteria": ["Checks $CONTEXT_LOCKR_KEY_PATH first", "Falls back to ~/.config/context-lockr/keys/<plugin>/lock.key", "Cross-platform (dirs crate)"],
+          "status": "complete",
+          "progress": 100
+        },
+        {
+          "id": "m5",
+          "name": "Decode command",
+          "description": "Add cl decode command that outputs to stdout",
+          "acceptance_criteria": ["cl decode <file.locked> works", "--plugin <name> for key lookup", "Outputs decoded text to stdout", "Clear error if key not found"],
+          "status": "complete",
+          "progress": 100
+        },
+        {
+          "id": "m6",
+          "name": "Standalone decoder binary",
+          "description": "Minimal binary with only decode logic for plugin bundling",
+          "acceptance_criteria": ["src/bin/decode.rs with minimal deps", "No lock/shred code included", "Binary size <1MB", "Cargo.toml binary target"],
+          "status": "complete",
+          "progress": 100
+        },
+        {
+          "id": "m7",
+          "name": "Plugin hook integration",
+          "description": "PreToolUse hook that transparently decodes .locked files on Read",
+          "acceptance_criteria": ["Hook matches Read tool on *.locked", "Runs ./decode and returns content", "Claude sees normal file content"],
+          "status": "complete",
+          "progress": 100
+        },
+        {
+          "id": "m8",
+          "name": "Bundle decode binary by default",
+          "description": "Automatically copy decode binary to output directory during lock",
+          "acceptance_criteria": ["decode binary bundled by default when --output is used", "--no-bundle-decoder flag skips bundling", "Bundled binary is executable and works"],
+          "status": "complete",
+          "progress": 100
+        }
+      ],
+      "deadline": null,
+      "status": "complete",
+      "created": "2026-01-16T23:00:00Z"
     }
   ],
   "current": {
     "loopState": "autonomous",
     "autonomousSession": {
       "active": true,
-      "goalDescription": "Lock entire directories with shared vocabulary",
+      "goalDescription": "Maximum distribution reach across all channels",
       "northStarId": "ns1",
-      "goalId": "g4",
-      "startedAt": "2026-01-16T22:15:00Z",
+      "goalId": "g3",
+      "startedAt": "2026-01-17T01:10:00Z",
       "iterationCount": 0
     },
     "lastAction": {
       "action": "auto",
-      "timestamp": "2026-01-16T22:15:00Z",
-      "description": "Started autonomous mode for g4"
+      "timestamp": "2026-01-17T01:10:00Z",
+      "description": "Started autonomous mode for g3: Maximum distribution reach"
     },
-    "humanTask": null,
-    "humanTaskQueue": [],
-    "aiTasks": [],
+    "humanTask": {
+      "taskId": "t-g3-publish",
+      "description": "Run cargo publish to publish context-lockr to crates.io",
+      "requiredCapability": "external_access",
+      "points": 3,
+      "estimatedBlocks": 1,
+      "energyLevel": "out",
+      "targetMilestones": [{"northStarId": "ns1", "goalId": "g3", "milestoneId": "m1"}],
+      "status": "assigned",
+      "assignedAt": "2026-01-17T01:10:00Z"
+    },
+    "humanTaskQueue": [
+      {
+        "taskId": "t-g3-github-release",
+        "description": "Push git tag to trigger GitHub Actions release workflow",
+        "independent": true,
+        "blockedBy": null,
+        "points": 2,
+        "requiredCapability": "external_access"
+      }
+    ],
+    "aiTasks": [
+      {
+        "id": "ai-001",
+        "taskId": "a182313",
+        "description": "Add crates.io metadata to Cargo.toml",
+        "status": "completed",
+        "startedAt": "2026-01-17T01:10:00Z",
+        "completedAt": "2026-01-17T01:29:00Z",
+        "northStarId": "ns1",
+        "goalId": "g3",
+        "milestoneId": "m1"
+      },
+      {
+        "id": "ai-002",
+        "taskId": "ac85f5f",
+        "description": "Create README.md for context-lockr",
+        "status": "completed",
+        "startedAt": "2026-01-17T01:10:00Z",
+        "completedAt": "2026-01-17T01:29:00Z",
+        "northStarId": "ns1",
+        "goalId": "g3",
+        "milestoneId": "m1"
+      },
+      {
+        "id": "ai-003",
+        "taskId": "af3171d",
+        "description": "Create GitHub Actions release workflow",
+        "status": "completed",
+        "startedAt": "2026-01-17T01:10:00Z",
+        "completedAt": "2026-01-17T01:29:00Z",
+        "northStarId": "ns1",
+        "goalId": "g3",
+        "milestoneId": "m2"
+      }
+    ],
     "batchMode": false,
     "reviewDebt": [],
     "reviewPending": false,
@@ -332,6 +483,15 @@
       "humanTasksCompleted": 0,
       "retriesBeforeSuccess": 0,
       "retriesEscalatedToHuman": 0
+    },
+    {
+      "id": "s-20260116-2315",
+      "goalDescription": "Access-controlled plugin deployment with on-demand decode",
+      "startedAt": "2026-01-16T23:15:00Z",
+      "aiTasksCompleted": 0,
+      "humanTasksCompleted": 0,
+      "retriesBeforeSuccess": 0,
+      "retriesEscalatedToHuman": 0
     }]
   },
   "patterns": {
@@ -339,9 +499,25 @@
     "lastPatternAnalysis": null
   },
   "velocity": {
-    "totalPoints": 0,
-    "totalBlocks": 0,
-    "history": []
+    "totalPoints": 3,
+    "totalBlocks": 1,
+    "history": [
+      {
+        "taskId": "ad-hoc-bundle-decode",
+        "type": "completion",
+        "executor": "claude",
+        "task": "Bundle decode binary by default in cl lock output directory",
+        "northStarId": "ns1",
+        "goalId": "g5",
+        "points": 3,
+        "estimatedBlocks": 1,
+        "actualBlocks": 1,
+        "milkQuality": "semi-skimmed",
+        "capabilityGap": null,
+        "completedAt": "2026-01-17T01:00:00Z",
+        "verified": true
+      }
+    ]
   },
   "journal": [
     {
