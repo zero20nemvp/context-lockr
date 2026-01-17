@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 /// context-lockr - LLM-native content protection
 ///
@@ -62,9 +63,9 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         keep: bool,
 
-        /// Skip bundling the decode binary in output directory
-        #[arg(long, default_value_t = false)]
-        no_bundle_decoder: bool,
+        /// Plugin name - bundles decoder and writes key to ~/.config/context-lockr/keys/<plugin>/
+        #[arg(long, short)]
+        plugin: Option<String>,
     },
 
     /// Decode a locked file to stdout
@@ -269,7 +270,106 @@ TO VERIFY AND EXECUTE:
     )
 }
 
-/// Handle locking an entire directory with shared vocabulary
+/// Check if a file should be excluded from locking
+fn is_excluded(path: &Path, _base_path: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+
+    // Skip .git directory
+    if path_str.contains("/.git/") || path_str.contains("\\.git\\") {
+        return true;
+    }
+
+    // Keep .claude-plugin readable (Claude Code needs to read plugin.json)
+    if path_str.contains("/.claude-plugin/") || path_str.contains("\\.claude-plugin\\") {
+        return true;
+    }
+
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        // Skip already locked files, key files, and backups
+        if name.ends_with(".locked") { return true; }
+        if name.ends_with(".key") { return true; }
+        if name.contains(".key") { return true; }
+        if name.ends_with(".backup") { return true; }
+
+        // Skip dotfiles (hidden files)
+        if name.starts_with('.') { return true; }
+
+        // Skip README files (keep them readable)
+        if name.starts_with("README") { return true; }
+    }
+
+    // Skip binary files by extension
+    if is_binary_extension(path) {
+        return true;
+    }
+
+    false
+}
+
+/// Check if file has a binary extension
+fn is_binary_extension(path: &Path) -> bool {
+    let binary_exts = [
+        "png", "jpg", "jpeg", "gif", "ico", "webp", "bmp", "tiff",
+        "woff", "woff2", "ttf", "eot", "otf",
+        "pdf", "doc", "docx", "xls", "xlsx",
+        "zip", "tar", "gz", "rar", "7z",
+        "exe", "dll", "so", "dylib",
+        "mp3", "mp4", "wav", "avi", "mov",
+        "sqlite", "db",
+    ];
+
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| binary_exts.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Check if file is a markdown file
+fn is_markdown(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase() == "md")
+        .unwrap_or(false)
+}
+
+/// Extract YAML frontmatter from markdown content
+/// Returns (frontmatter_with_delimiters, body) where frontmatter may be None
+fn extract_frontmatter(content: &str) -> (Option<String>, String) {
+    if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
+        return (None, content.to_string());
+    }
+
+    // Find closing --- (must be on its own line)
+    let search_start = if content.starts_with("---\r\n") { 5 } else { 4 };
+
+    // Look for \n---\n or \r\n---\r\n
+    if let Some(end_idx) = content[search_start..].find("\n---\n") {
+        let frontmatter_end = search_start + end_idx + 4; // include the \n---
+        let body_start = frontmatter_end + 1; // skip the final \n
+        let frontmatter = content[..frontmatter_end].to_string();
+        let body = if body_start < content.len() {
+            content[body_start..].to_string()
+        } else {
+            String::new()
+        };
+        (Some(frontmatter), body)
+    } else if let Some(end_idx) = content[search_start..].find("\r\n---\r\n") {
+        let frontmatter_end = search_start + end_idx + 5; // include the \r\n---
+        let body_start = frontmatter_end + 2; // skip the final \r\n
+        let frontmatter = content[..frontmatter_end].to_string();
+        let body = if body_start < content.len() {
+            content[body_start..].to_string()
+        } else {
+            String::new()
+        };
+        (Some(frontmatter), body)
+    } else {
+        // No closing ---, treat as no frontmatter
+        (None, content.to_string())
+    }
+}
+
+/// Handle locking an entire directory with shared vocabulary (recursive)
 fn handle_lock_directory(
     path: PathBuf,
     output: Option<PathBuf>,
@@ -277,7 +377,7 @@ fn handle_lock_directory(
     keys: u8,
     chaff: usize,
     keep: bool,
-    no_bundle_decoder: bool,
+    plugin: Option<String>,
 ) -> Result<()> {
     let dirname = path
         .file_name()
@@ -285,8 +385,9 @@ fn handle_lock_directory(
         .context("Invalid directory name")?
         .to_string();
 
-    // Determine output directory
-    let output_dir = output.unwrap_or_else(|| path.clone());
+    // Determine output directory - create subdir with same name as source
+    let output_base = output.unwrap_or_else(|| path.parent().unwrap_or(&path).to_path_buf());
+    let output_dir = output_base.join(&dirname);
 
     // Determine key output directory
     let key_dir = key_path_opt.unwrap_or_else(|| output_dir.clone());
@@ -307,19 +408,13 @@ fn handle_lock_directory(
     println!("  Keys: {}", keys);
     println!("  Chaff ratio: {}x", chaff);
 
-    // Step 1: Collect all files in directory (flat, non-recursive)
-    let files: Vec<PathBuf> = fs::read_dir(&path)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|p| p.is_file())
-        .filter(|p| {
-            // Skip already locked files, key files, and backups
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            !name.ends_with(".locked")
-                && !name.ends_with(".key")
-                && !name.contains(".key")
-                && !name.ends_with(".backup")
-        })
+    // Step 1: Collect all files recursively
+    let files: Vec<PathBuf> = WalkDir::new(&path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.path().to_path_buf())
+        .filter(|p| !is_excluded(p, &path))
         .collect();
 
     if files.is_empty() {
@@ -328,19 +423,30 @@ fn handle_lock_directory(
 
     println!("  Files to lock: {}", files.len());
     for f in &files {
-        println!("    - {:?}", f.file_name().unwrap_or_default());
+        if let Ok(rel) = f.strip_prefix(&path) {
+            println!("    - {}", rel.display());
+        }
     }
 
     // Step 2: Read all files and combine content for vocabulary
+    // For markdown files, only use body (not frontmatter) for vocabulary
     let mut combined_content = String::new();
-    let mut file_contents: Vec<(PathBuf, String)> = Vec::new();
+    let mut file_contents: Vec<(PathBuf, String, Option<String>)> = Vec::new(); // (path, content, frontmatter)
 
     for file_path in &files {
         let content = fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read file: {:?}", file_path))?;
-        combined_content.push_str(&content);
-        combined_content.push('\n');
-        file_contents.push((file_path.clone(), content));
+
+        if is_markdown(file_path) {
+            let (frontmatter, body) = extract_frontmatter(&content);
+            combined_content.push_str(&body);
+            combined_content.push('\n');
+            file_contents.push((file_path.clone(), content, frontmatter));
+        } else {
+            combined_content.push_str(&content);
+            combined_content.push('\n');
+            file_contents.push((file_path.clone(), content, None));
+        }
     }
 
     // Step 3: Build shared vocabulary from combined content
@@ -351,39 +457,57 @@ fn handle_lock_directory(
         files.len()
     );
 
-    // Step 4: Encode each file and write .locked version
-    for (file_path, content) in &file_contents {
-        let filename = file_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .context("Invalid filename")?;
+    // Step 4: Encode each file and write .locked version, preserving directory structure
+    for (file_path, content, frontmatter) in &file_contents {
+        // Compute relative path from source root
+        let rel_path = file_path.strip_prefix(&path)
+            .with_context(|| format!("Failed to compute relative path for {:?}", file_path))?;
 
-        // Only create backup if output is same as source
-        if output_dir == path {
-            let backup_path = file_path.with_extension(format!(
-                "{}.backup",
-                file_path.extension().and_then(|e| e.to_str()).unwrap_or("")
-            ));
-            fs::copy(file_path, &backup_path)
-                .with_context(|| format!("Failed to create backup for {:?}", file_path))?;
-        }
+        // Determine output path, preserving directory structure
+        let locked_filename = format!(
+            "{}.locked",
+            rel_path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+        );
+        let locked_path = if let Some(parent) = rel_path.parent() {
+            let parent_dir = output_dir.join(parent);
+            if !parent_dir.exists() {
+                fs::create_dir_all(&parent_dir)
+                    .with_context(|| format!("Failed to create directory: {:?}", parent_dir))?;
+            }
+            parent_dir.join(&locked_filename)
+        } else {
+            output_dir.join(&locked_filename)
+        };
 
-        // Encode content
-        let encoded = vocab.encode(content);
+        // For markdown files with frontmatter, only encode the body
+        let (header, token_string) = if let Some(fm) = frontmatter {
+            let (_, body) = extract_frontmatter(content);
+            let encoded = vocab.encode(&body);
+            let tokens: String = encoded
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            // Frontmatter stays readable, body is tokenized
+            (format!("{}\n", fm), tokens)
+        } else {
+            let encoded = vocab.encode(content);
+            let tokens: String = encoded
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+            (generate_directory_locked_header(&dirname, filename, keys), tokens)
+        };
 
-        // Write .locked file to output directory
-        let locked_path = output_dir.join(format!("{}.locked", filename));
-        let header = generate_directory_locked_header(&dirname, filename, keys);
-        let token_string: String = encoded
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
         let locked_content = format!("{}{}", header, token_string);
-
         fs::write(&locked_path, &locked_content)
             .with_context(|| format!("Failed to write locked file: {:?}", locked_path))?;
-        println!("✓ Locked: {:?}", locked_path);
+
+        if let Ok(rel) = locked_path.strip_prefix(&output_dir) {
+            println!("✓ Locked: {}", rel.display());
+        }
     }
 
     // Step 5: Shred vocabulary and write key file(s)
@@ -409,8 +533,30 @@ fn handle_lock_directory(
         anyhow::bail!("Integrity verification failed!");
     }
 
-    // Step 7: Bundle decode binary (default behavior, unless --no-bundle-decoder)
-    if !no_bundle_decoder {
+    // Step 7: If --plugin is specified, bundle decoder and copy key to plugin directory
+    if let Some(ref plugin_name) = plugin {
+        // Copy key to ~/.config/context-lockr/keys/<plugin>/
+        let config_dir = dirs::config_dir().context("Could not determine config directory")?;
+        let plugin_key_dir = config_dir
+            .join("context-lockr")
+            .join("keys")
+            .join(plugin_name);
+
+        if !plugin_key_dir.exists() {
+            fs::create_dir_all(&plugin_key_dir)
+                .with_context(|| format!("Failed to create plugin key directory: {:?}", plugin_key_dir))?;
+        }
+
+        // Copy key file(s) to plugin directory
+        for shard in &shards {
+            let src_key_path = key_dir.join(key_filename(&dirname, shard.index, keys));
+            let dest_key_path = plugin_key_dir.join(key_filename(&dirname, shard.index, keys));
+            fs::copy(&src_key_path, &dest_key_path)
+                .with_context(|| format!("Failed to copy key to plugin directory: {:?}", dest_key_path))?;
+        }
+        println!("✓ Key copied to plugin directory: {:?}", plugin_key_dir);
+
+        // Bundle decode binary
         match bundle_decode_binary(&output_dir) {
             Ok(_) => {}
             Err(e) => {
@@ -420,7 +566,8 @@ fn handle_lock_directory(
         }
     }
 
-    // Step 8: Prompt for deletion only if output == source (unless --keep)
+    // Step 8: Skip deletion prompt for directory locking when output != source
+    // (we preserve originals by default for safety)
     if !keep && output_dir == path {
         println!();
         print!("Delete original files? [y/N]: ");
@@ -431,26 +578,20 @@ fn handle_lock_directory(
 
         let answer = input.trim().to_lowercase();
         if answer == "y" || answer == "yes" {
-            for (file_path, _) in &file_contents {
+            for (file_path, _, _) in &file_contents {
                 fs::remove_file(file_path)
                     .with_context(|| format!("Failed to delete original: {:?}", file_path))?;
-
-                // Also delete backup
-                let backup_path = file_path.with_extension(format!(
-                    "{}.backup",
-                    file_path.extension().and_then(|e| e.to_str()).unwrap_or("")
-                ));
-                let _ = fs::remove_file(&backup_path);
             }
             println!("✓ Originals deleted");
         } else {
-            println!("Originals kept (backups also preserved)");
+            println!("Originals kept");
         }
     }
 
     println!();
     println!(
-        "Done! Directory locked. Load {} + .locked files into LLM context to decode.",
+        "Done! Directory locked ({} files). Load {} + .locked files into LLM context to decode.",
+        file_contents.len(),
         key_filename(&dirname, 1, keys)
     );
 
@@ -464,7 +605,7 @@ fn handle_lock(
     keys: u8,
     chaff: usize,
     keep: bool,
-    no_bundle_decoder: bool,
+    plugin: Option<String>,
 ) -> Result<()> {
     // Validate keys value
     if keys == 0 || keys > 8 {
@@ -478,7 +619,7 @@ fn handle_lock(
 
     // Dispatch to directory handler if path is a directory
     if path.is_dir() {
-        return handle_lock_directory(path, output, key_path_opt, keys, chaff, keep, no_bundle_decoder);
+        return handle_lock_directory(path, output, key_path_opt, keys, chaff, keep, plugin);
     }
 
     // Validate path is a file (not a symlink or other)
@@ -575,8 +716,30 @@ fn handle_lock(
         anyhow::bail!("Integrity verification failed!");
     }
 
-    // Step 7: Bundle decode binary (default behavior, unless --no-bundle-decoder)
-    if !no_bundle_decoder {
+    // Step 7: If --plugin is specified, bundle decoder and copy key to plugin directory
+    if let Some(ref plugin_name) = plugin {
+        // Copy key to ~/.config/context-lockr/keys/<plugin>/
+        let config_dir = dirs::config_dir().context("Could not determine config directory")?;
+        let plugin_key_dir = config_dir
+            .join("context-lockr")
+            .join("keys")
+            .join(plugin_name);
+
+        if !plugin_key_dir.exists() {
+            fs::create_dir_all(&plugin_key_dir)
+                .with_context(|| format!("Failed to create plugin key directory: {:?}", plugin_key_dir))?;
+        }
+
+        // Copy key file(s) to plugin directory
+        for shard in &shards {
+            let src_key_path = key_dir.join(key_filename(filename, shard.index, keys));
+            let dest_key_path = plugin_key_dir.join(key_filename(filename, shard.index, keys));
+            fs::copy(&src_key_path, &dest_key_path)
+                .with_context(|| format!("Failed to copy key to plugin directory: {:?}", dest_key_path))?;
+        }
+        println!("✓ Key copied to plugin directory: {:?}", plugin_key_dir);
+
+        // Bundle decode binary
         match bundle_decode_binary(&output_dir) {
             Ok(_) => {}
             Err(e) => {
@@ -923,8 +1086,8 @@ fn main() -> Result<()> {
             keys,
             chaff,
             keep,
-            no_bundle_decoder,
-        } => handle_lock(path, output, key_path, keys, chaff, keep, no_bundle_decoder),
+            plugin,
+        } => handle_lock(path, output, key_path, keys, chaff, keep, plugin),
         Commands::Decode { file, plugin } => handle_decode(file, plugin),
         Commands::Clean { path } => handle_clean(path),
         Commands::Version => {
@@ -1082,21 +1245,30 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parses_lock_no_bundle_decoder() {
-        // Default: bundle_decoder should be true (bundling is default)
+    fn test_cli_parses_lock_with_plugin() {
+        // Default: plugin should be None (no bundling)
         let cli = Cli::parse_from(["cl", "lock", "/source", "--output", "/dest"]);
         match cli.command {
-            Commands::Lock { no_bundle_decoder, .. } => {
-                assert!(!no_bundle_decoder, "Default should bundle decoder");
+            Commands::Lock { plugin, .. } => {
+                assert!(plugin.is_none(), "Default should have no plugin");
             }
             _ => panic!("Expected Lock command"),
         }
 
-        // With --no-bundle-decoder: should be true (skip bundling)
-        let cli = Cli::parse_from(["cl", "lock", "/source", "--output", "/dest", "--no-bundle-decoder"]);
+        // With --plugin: should bundle decoder and copy key to plugin directory
+        let cli = Cli::parse_from(["cl", "lock", "/source", "--output", "/dest", "--plugin", "agentc"]);
         match cli.command {
-            Commands::Lock { no_bundle_decoder, .. } => {
-                assert!(no_bundle_decoder, "--no-bundle-decoder should disable bundling");
+            Commands::Lock { plugin, .. } => {
+                assert_eq!(plugin, Some("agentc".to_string()), "--plugin should set plugin name");
+            }
+            _ => panic!("Expected Lock command"),
+        }
+
+        // Short form -p should also work
+        let cli = Cli::parse_from(["cl", "lock", "/source", "-p", "myplug"]);
+        match cli.command {
+            Commands::Lock { plugin, .. } => {
+                assert_eq!(plugin, Some("myplug".to_string()), "-p short flag should work");
             }
             _ => panic!("Expected Lock command"),
         }

@@ -1,6 +1,6 @@
 [package]
 name = "context-lockr"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Delaney Burke <delaney@zero2one.ee>"]
 license = "MIT"
@@ -27,3 +27,4 @@ anyhow = "1.0"
 rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"
+walkdir = "2.4"
